@@ -18,3 +18,8 @@ patches:
         value:
           name: OPENAI_BASE_URL
           value: http://mock-model:8081/v1
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: NANOCODEX_MCP_ALLOWED_URLS
+          value: http://mock-model:8081/mcp

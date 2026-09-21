@@ -77,26 +77,165 @@ pub enum Environment {
 #[serde(deny_unknown_fields)]
 pub struct CreateSession {
     pub environment: Environment,
-    pub agent: AgentInput,
+    pub agent: Option<AgentInput>,
+    pub agent_id: Option<String>,
     pub input: Option<Input>,
     #[serde(default)]
     pub stream: bool,
     pub metadata: Option<Metadata>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInput {
-    pub model: String,
+    pub model: Option<String>,
     pub instructions: Option<String>,
+    pub tools: Option<Vec<ToolConfig>>,
+    pub multi_agent: Option<MultiAgent>,
+    pub reasoning: Option<Reasoning>,
+    pub name: Option<String>,
+    pub metadata: Option<Metadata>,
 }
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum ToolConfig {
+    #[serde(rename = "function")]
+    Function {
+        name: String,
+        description: String,
+        parameters: serde_json::Value,
+        #[serde(default)]
+        defer_loading: bool,
+    },
+    #[serde(rename = "mcp")]
+    Mcp {
+        server_label: String,
+        transport: McpTransport,
+        allowed_tools: Option<Vec<String>>,
+        connection_origin: Option<String>,
+        #[serde(default)]
+        required: bool,
+    },
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum McpTransport {
+    #[serde(rename = "http")]
+    Http {
+        server_url: String,
+        authorization: Option<String>,
+        headers: Option<Metadata>,
+    },
+    #[serde(rename = "stdio")]
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        env: Option<Metadata>,
+    },
+}
+impl ToolConfig {
+    pub fn public(&self) -> Self {
+        let mut tool = self.clone();
+        if let Self::Mcp { transport, .. } = &mut tool {
+            match transport {
+                McpTransport::Http {
+                    authorization,
+                    headers,
+                    ..
+                } => {
+                    *authorization = None;
+                    *headers = None;
+                }
+                McpTransport::Stdio { env, .. } => *env = None,
+            }
+        }
+        tool
+    }
+}
+
 impl AgentInput {
     pub fn validate(&self) -> ApiResult<Model> {
         if self.instructions.as_ref().is_some_and(|s| s.len() > 32_768) {
             return Err(ApiError::invalid("Instructions exceed 32768 bytes"));
         }
-        let model: Model = self.model.parse().map_err(ApiError::invalid)?;
-        if model.as_str() != self.model {
+        let name = self.model.as_deref().unwrap_or("gpt-5.6-sol");
+        let model: Model = name.parse().map_err(ApiError::invalid)?;
+        if model.as_str() != name {
             return Err(ApiError::invalid("Use a full model ID"));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for tool in self.tools.as_deref().unwrap_or_default() {
+            if matches!(
+                tool,
+                ToolConfig::Function {
+                    defer_loading: true,
+                    ..
+                }
+            ) {
+                return Err(ApiError::invalid(
+                    "Deferred client functions are not supported",
+                ));
+            }
+            if matches!(tool, ToolConfig::Mcp { required: true, .. }) {
+                return Err(ApiError::invalid(
+                    "Required MCP startup checks are not supported",
+                ));
+            }
+            let name = match tool {
+                ToolConfig::Function {
+                    name, parameters, ..
+                } => {
+                    jsonschema::validator_for(parameters)
+                        .map_err(|_| ApiError::invalid("Invalid function JSON schema"))?;
+                    name
+                }
+                ToolConfig::Mcp { server_label, .. } => server_label,
+            };
+            if name.is_empty()
+                || name.len() > 64
+                || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                || !names.insert(name)
+                || [
+                    "exec",
+                    "wait",
+                    "tool_search",
+                    "spawn_agent",
+                    "submit_result",
+                    "send_agent_message",
+                    "list_agents",
+                    "wait_agent",
+                    "interrupt_agent",
+                    "close_agent",
+                    "memory_read",
+                    "memory_search",
+                    "memory_journal",
+                    "memory_write",
+                    "memory_delete",
+                ]
+                .contains(&name.as_str())
+            {
+                return Err(ApiError::invalid(
+                    "Tool names must be unique, valid, and not reserved",
+                ));
+            }
+        }
+        if self.tools.as_ref().is_some_and(|t| t.len() > 64) {
+            return Err(ApiError::invalid("At most 64 tools are supported"));
+        }
+        if let Some(config) = &self.multi_agent
+            && config
+                .max_concurrent_subagents
+                .is_some_and(|n| n == 0 || n > 32)
+        {
+            return Err(ApiError::invalid(
+                "Subagent concurrency must be from 1 to 32",
+            ));
+        }
+        if let Some(reasoning) = &self.reasoning {
+            reasoning
+                .effort
+                .parse::<nanocodex::Thinking>()
+                .map_err(ApiError::invalid)?;
         }
         Ok(model)
     }
@@ -190,6 +329,28 @@ pub enum InputEvent {
     Message { input: Vec<InputMessage> },
     #[serde(rename = "agent.session.input.cancel")]
     Cancel,
+    #[serde(rename = "agent.session.input.tool_result")]
+    ToolResult {
+        call_id: String,
+        turn_id: String,
+        success: bool,
+        output: Option<FunctionOutput>,
+        error: Option<String>,
+    },
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum FunctionOutput {
+    Text(String),
+    Content(Vec<InputText>),
+}
+impl FunctionOutput {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Content(c) => c.iter().map(InputText::text).collect::<Vec<_>>().join("\n"),
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -263,18 +424,20 @@ pub struct Agent {
     pub model: String,
     pub instructions: Option<String>,
     pub name: Option<String>,
-    pub tools: Vec<Unsupported>,
+    pub tools: Vec<ToolConfig>,
     pub multi_agent: MultiAgent,
     pub reasoning: Reasoning,
     pub service_tier: String,
     pub text: TextConfig,
 }
 #[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MultiAgent {
     pub enabled: bool,
     pub max_concurrent_subagents: Option<u32>,
 }
 #[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Reasoning {
     pub effort: String,
     pub summary: Option<String>,
@@ -288,9 +451,6 @@ pub struct TextConfig {
 pub struct TextFormat {
     pub r#type: String,
 }
-// Empty arrays are part of the supported wire contract. This type cannot have elements.
-#[derive(Clone, Deserialize, Serialize)]
-pub enum Unsupported {}
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Session {
     pub id: String,
@@ -302,7 +462,7 @@ pub struct Session {
     pub status: SessionStatus,
     pub error: Option<String>,
     pub metadata: Metadata,
-    pub required_actions: Vec<Unsupported>,
+    pub required_actions: Vec<RequiredAction>,
     pub usage: Option<Usage>,
     pub vault_ids: Vec<String>,
 }
@@ -311,6 +471,7 @@ pub struct Session {
 pub enum SessionStatus {
     Idle,
     InProgress,
+    RequiresAction,
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Usage {
@@ -371,6 +532,7 @@ pub struct Turn {
 #[serde(rename_all = "snake_case")]
 pub enum TurnStatus {
     InProgress,
+    Waiting,
     Completed,
     Cancelled,
     Failed,
@@ -381,7 +543,7 @@ pub struct TurnError {
     pub message: String,
 }
 #[derive(Clone, Deserialize, Serialize)]
-pub struct Item {
+pub struct MessageItem {
     pub id: String,
     pub r#type: String,
     pub turn_id: String,
@@ -405,9 +567,146 @@ impl Identified for Turn {
         &self.id
     }
 }
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum Item {
+    Message(MessageItem),
+    Function(FunctionItem),
+    FunctionOutput(FunctionOutputItem),
+    Mcp(McpItem),
+    Coordination(CoordinationItem),
+}
 impl Identified for Item {
     fn id(&self) -> &str {
+        match self {
+            Self::Message(v) => &v.id,
+            Self::Function(v) => &v.id,
+            Self::FunctionOutput(v) => &v.id,
+            Self::Mcp(v) => &v.id,
+            Self::Coordination(v) => &v.id,
+        }
+    }
+}
+impl Item {
+    pub fn turn_id(&self) -> &str {
+        match self {
+            Self::Message(v) => &v.turn_id,
+            Self::Function(v) => &v.turn_id,
+            Self::FunctionOutput(v) => &v.turn_id,
+            Self::Mcp(v) => &v.turn_id,
+            Self::Coordination(v) => &v.turn_id,
+        }
+    }
+}
+#[derive(Clone, Deserialize, Serialize)]
+pub struct FunctionItem {
+    pub id: String,
+    pub r#type: String,
+    pub call_id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub status: String,
+    pub turn_id: String,
+}
+#[derive(Clone, Deserialize, Serialize)]
+pub struct FunctionOutputItem {
+    pub id: String,
+    pub r#type: String,
+    pub call_id: String,
+    pub output: Option<FunctionOutput>,
+    pub error: Option<String>,
+    pub status: String,
+    pub turn_id: String,
+}
+#[derive(Clone, Deserialize, Serialize)]
+pub struct McpItem {
+    pub id: String,
+    pub r#type: String,
+    pub server_label: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub status: String,
+    pub turn_id: String,
+    pub output: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+#[derive(Clone, Deserialize, Serialize)]
+pub struct CoordinationItem {
+    pub id: String,
+    pub status: String,
+    pub turn_id: String,
+    #[serde(flatten)]
+    pub action: CoordinationAction,
+}
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum CoordinationAction {
+    #[serde(rename = "create_subagent_call")]
+    Create {
+        agent_id: String,
+        content: Vec<TextContent>,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+    },
+    #[serde(rename = "send_subagent_input_call")]
+    Send {
+        recipient_agent_id: String,
+        sender_agent_id: String,
+        content: Vec<TextContent>,
+    },
+    #[serde(rename = "wait_for_subagents_call")]
+    Wait {
+        recipient_agent_ids: Vec<String>,
+        sender_agent_id: String,
+    },
+    #[serde(rename = "interrupt_subagent_call")]
+    Interrupt {
+        recipient_agent_id: String,
+        sender_agent_id: String,
+    },
+    #[serde(rename = "close_subagent_call")]
+    Close {
+        recipient_agent_id: String,
+        sender_agent_id: String,
+    },
+}
+#[derive(Clone, Deserialize, Serialize)]
+pub struct RequiredAction {
+    pub r#type: String,
+    pub call_id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub turn_id: String,
+}
+#[derive(Clone, Deserialize, Serialize)]
+pub struct Subagent {
+    pub id: String,
+    pub object: String,
+    pub session_id: String,
+    pub parent_agent_id: String,
+    pub name: Option<String>,
+    pub instructions: Option<Vec<TextContent>>,
+    pub opened_at: i64,
+    pub closed_at: Option<i64>,
+    pub status: String,
+}
+impl Identified for Subagent {
+    fn id(&self) -> &str {
         &self.id
+    }
+}
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SavedAgent {
+    #[serde(flatten)]
+    pub agent: Agent,
+    pub object: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub metadata: Metadata,
+}
+impl Identified for SavedAgent {
+    fn id(&self) -> &str {
+        &self.agent.id
     }
 }
 
@@ -422,6 +721,12 @@ pub struct Event {
 pub enum EventData {
     #[serde(rename = "agent.session.created")]
     Created { session: Session },
+    #[serde(rename = "agent.session.requires_action")]
+    RequiresAction { session: Session },
+    #[serde(rename = "agent.session.subagent.created")]
+    SubagentCreated { subagent: Subagent },
+    #[serde(rename = "agent.session.subagent.closed")]
+    SubagentClosed { subagent: Subagent },
     #[serde(rename = "agent.session.idle")]
     Idle { session: Session },
     #[serde(rename = "agent.session.in_progress")]

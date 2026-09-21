@@ -1,32 +1,53 @@
-# NanoCodex Agents API
+# NanoCodex managed API
 
-This service puts an HTTP API in front of the NanoCodex Rust engine. It runs in a
-normal Kubernetes Pod. A VM, AX, and a confidential execution environment are not
-required. The API is open source; model inference still uses an external provider.
+A Rust HTTP service for NanoCodex, with a Kubernetes deployment and persistent
+agent memory. A VM is optional. The current deployment uses no VM.
 
-The supported routes work with `openai@7.15.0` and
-`client.beta.agents.sessions`. They implement a limited part of the
-[OpenAI Agents API](https://developers.openai.com/api/docs/guides/agents-api/overview).
-This is not a proxy to OpenAI's hosted Agents API. NanoCodex owns the agent loop
-and calls the OpenAI Responses API for inference.
+## API and SDK support
 
-## Use with the OpenAI SDK
+Two interfaces have different owners:
 
-```ts
+| Interface | Execution owner | Tested behavior |
+| --- | --- | --- |
+| `client.beta.agents` in `openai@7.15.0` | This service runs NanoCodex | Saved agents, sessions, retained context, streaming, steering, cancellation, client functions, native MCP, native subagents, child history |
+| `Runner` in `@openai/agents@0.18.0` | The SDK runs the agent loop; this service forwards `POST /v1/responses` to the model provider | Streaming and nonstreaming functions, handoffs, agent-as-tool, MCP, input guardrails |
+| `/v1/agents/{agent_id}/memory` | This service | Persistent records, inspection, clearing, and reconciliation |
+
+The Responses route preserves the provider's request, output, and stream. It
+uses the server's model credential. It does not convert an SDK Runner into a
+server-owned NanoCodex session. Managed memory applies to the saved-agent/session
+interface. SDK Runner applications must select and manage their own session or
+memory integration.
+
+This is **not full OpenAI platform parity**. The service does not implement
+files, hosted execution environments, vaults, realtime, audio, image inputs,
+Chat Completions, the tracing backend, or Responses retrieval/deletion routes.
+The session API accepts text and `environment: { type: 'none' }`. Deferred client
+functions and required MCP startup checks are rejected. Native MCP discovery is
+supported. HTTP MCP is tested; stdio MCP is implemented but not tested here.
+Unsupported fields and routes return errors.
+
+## Use a persistent agent
+
+```typescript
 import OpenAI from 'openai';
 
-const apiKey = process.env.NANOCODEX_API_TOKEN;
-if (!apiKey) throw new Error('Set NANOCODEX_API_TOKEN');
 const client = new OpenAI({
   baseURL: 'http://127.0.0.1:18080/v1',
-  apiKey,
+  apiKey: process.env.NANOCODEX_API_TOKEN,
 });
+const agent = await client.beta.agents.create({
+  model: 'gpt-5.6-sol',
+  name: 'Personal assistant',
+  instructions: 'Help with daily tasks.',
+});
+// Save agent.id in your application. Use it for each new conversation.
 const session = await client.beta.agents.sessions.create({
+  agent_id: agent.id,
   environment: { type: 'none' },
-  agent: { model: 'gpt-5.6-sol', instructions: 'Give concise answers.' },
 });
 for await (const event of client.beta.agents.sessions.stream(session.id, {
-  input: 'Explain how this API works.',
+  input: 'Remember that my favorite tree is cedar.',
 })) {
   if (event.type === 'agent.session.turn.output_text.delta') {
     process.stdout.write(event.delta);
@@ -34,132 +55,168 @@ for await (const event of client.beta.agents.sessions.stream(session.id, {
 }
 ```
 
-`NANOCODEX_API_TOKEN` authenticates clients to this service. `OPENAI_API_KEY` is the
-separate provider credential, held by the service. Do not give the provider key
-to API clients.
+Creating a session with an inline `agent` also saves that agent. Its returned
+`session.agent.id` can be reused. A session keeps its configuration snapshot when
+the saved agent is changed or deleted.
 
-## Contract
+## Functions, MCP, and subagents
 
-| Route under `/v1` | Support |
-| --- | --- |
-| `POST /agents/sessions` | Inline `agent.model`, optional `agent.instructions`, `environment: {type: "none"}`, text input, metadata, optional SSE |
-| `GET /agents/sessions` | Cursor pagination: `after`, `limit`, `order` |
-| `GET /agents/sessions/{id}` | Current session state |
-| `POST /agents/sessions/{id}` | Replace metadata |
-| `DELETE /agents/sessions/{id}` | Delete an idle session and its stored checkpoint/history |
-| `POST /agents/sessions/{id}/events` | One text input or cancel event; optional durable `Idempotency-Key` |
-| `GET /agents/sessions/{id}/events` | Live SSE subscription |
-| `GET /agents/sessions/{id}/items` | Stored messages, with cursor pagination |
-| `GET /agents/sessions/{id}/turns` | Stored turns, with cursor pagination |
-| `GET /agents/sessions/{id}/turns/{turn_id}` | Turn status, error, and reported usage |
+Declare a function in `agent.tools`, with `type: 'function'`, `name`,
+`description`, and a JSON Schema `parameters` object. Pass a handler under
+`toolHandlers` to `sessions.stream`. The native turn waits for the handler's
+result. For a custom client, read `required_actions`, then submit
+`agent.session.input.tool_result` with the matching `turn_id` and `call_id`.
+An `Idempotency-Key` permits a safe retry. Cancellation clears pending calls.
 
-Supported models follow this NanoCodex revision: `gpt-5.6-sol`, `gpt-5.6-terra`,
-and `gpt-5.6-luna`. The service fixes reasoning effort at `low` and disables
-priority processing. It does not expose model reasoning or internal engine events.
+An HTTP MCP tool has this shape:
 
-Tools, reusable agent CRUD/`agent_id`, images, files, artifacts, MCP, subagents,
-steering, vaults, custom model settings, and hosted/self-hosted execution
-environments are not implemented. Unknown request fields fail with HTTP 400.
-Unknown endpoints fail with HTTP 404. Input during an active turn fails with HTTP
-409. API errors use the OpenAI error envelope. These limits are part of the
-current contract; SDK support does not mean full OpenAI API parity.
-
-SSE delivers new events. It has no event replay. Subscribe before submitting
-input, as the SDK `sessions.stream()` helper does. On reconnect, get stored
-items and turns. A slow subscriber is disconnected if its 256-event buffer fills.
-Closing a stream does not cancel a turn. Send `agent.session.input.cancel` to
-cancel. Check terminal turn status; an idle session alone does not mean success.
-
-Completed history, token totals, and the NanoCodex checkpoint commit together in
-SQLite. Completed sessions survive Pod replacement with the same volume.
-Interrupted turns become failed on startup and are not automatically run again.
-A new turn resumes the last **completed** engine checkpoint. Failed/cancelled
-turns remain in API history but do not enter subsequent model context.
-Repeated event keys return success without starting duplicate work; a changed
-body with the same key returns 409. Keys have session scope and remain until the
-session is deleted. Session creation itself is not idempotent.
-
-Limits: four concurrent turns, 300 seconds per turn, 200 turns per session,
-1,000 sessions, 128 KiB HTTP bodies, and 64 KiB text input. There is one service
-instance and one operator credential. Every client with that credential has
-access to every session. Do not use this version as a public multi-tenant service
-and do not increase the replica count.
-
-## Local Kubernetes deployment
-
-Requirements: Docker, kind, kubectl, and Bun for tests. Run commands from the
-repository root. Use the explicit context to keep other clusters unchanged.
-
-```sh
-kind create cluster --name nanocodex
-# If the cluster exists, reuse it.
-docker build -f services/api/Dockerfile -t nanocodex-api:k8s-v1 .
-kind load docker-image nanocodex-api:k8s-v1 --name nanocodex
-kubectl --context kind-nanocodex apply -f deploy/k8s/base/namespace.yaml
+```typescript
+const mcp = {
+  type: 'mcp' as const,
+  server_label: 'docs',
+  transport: { type: 'http' as const, server_url: 'https://mcp.example.com/mcp' },
+  connection_origin: 'service' as const,
+  allowed_tools: ['search'],
+};
 ```
 
-Provide an existing Secret named `nanocodex-api` in namespace `nanocodex` with
-fields `api-token` (32 bytes or more) and `openai-api-key`. To create it from
-existing files without placing values in shell arguments:
+The operator must put the exact URL in `NANOCODEX_MCP_ALLOWED_URLS` (comma-separated).
+No MCP destinations are allowed by default. `NANOCODEX_MCP_ALLOWED_COMMANDS`
+provides the corresponding stdio command allowlist. Only configure trusted
+stdio programs: their arguments and environment are supplied by the API caller.
+Transport credentials are stored with the configuration but removed from public
+agent/session responses. Native MCP uses tool discovery and Code Mode; call
+results appear in session history.
+
+Set `multi_agent: { enabled: true, max_concurrent_subagents: 6 }` for native
+spawn, message, list, wait, interrupt, and close tools. Children inherit MCP and
+read-only agent memory. Client functions remain on the root agent. The session's
+`subagents` routes expose child resources, turns, usage, and items. A cancelled
+root interrupts its children; deleting a session closes its runtime.
+
+## Use the official Agents SDK
+
+```typescript
+import { Agent, Runner, OpenAIProvider, setTracingDisabled } from '@openai/agents';
+
+setTracingDisabled(true);
+const runner = new Runner({
+  modelProvider: new OpenAIProvider({
+    baseURL: 'http://127.0.0.1:18080/v1',
+    apiKey: process.env.NANOCODEX_API_TOKEN,
+    useResponses: true,
+  }),
+  tracingDisabled: true,
+});
+const specialist = new Agent({ name: 'Specialist', model: 'gpt-5.6-sol' });
+const coordinator = new Agent({
+  name: 'Coordinator', model: 'gpt-5.6-sol', handoffs: [specialist],
+});
+const result = await runner.run(coordinator, 'Ask the specialist for help.');
+console.log(result.finalOutput);
+```
+
+The SDK executes handoffs, local functions, and local MCP clients. Their network
+access is controlled by the application host. The service's MCP allowlist applies
+to the server-owned session interface.
+
+## Managed memory
+
+`nanocodex-memory` is an MIT-licensed workspace crate. Each persistent agent ID
+owns a bundle of Markdown files: `profile.md`, generated `index.md`, typed
+records, dated journals, and an audit log. The API stores bundles, prior versions,
+and completed task material in SQLite on the PVC.
+
+The root agent gets `memory_read`, `memory_search`, and `memory_journal` by
+default. Profile and index are supplied as untrusted evidence on each new turn.
+Journal notes are staged until successful completion. Failed and cancelled turns
+do not add reconciliation material. Notes also remain in completed task material
+if the dated journal has reached its size limit.
+
+The worker checks pending work every 60 seconds. Each pass processes up to 20
+tasks and approximately 512 KiB of source material per agent. It uses the saved
+agent's model and only memory tools. A separate draft receives edits. Validation
+checks file structure, dates, links, size limits, the profile, and the audit log;
+it then generates the index. A transaction accepts the complete bundle only if
+its stored revision has not changed. Invalid drafts leave prior memory intact.
+The validator checks structure, not factual truth. This process makes additional
+model calls.
+
+Authenticated extensions:
+
+- `GET /v1/agents/{agent_id}/memory`: files, revision, pending task count.
+- `POST /v1/agents/{agent_id}/memory/reconcile`: process one batch now. A concurrent
+  job or revision change returns 409. Retry after the other operation ends.
+- `DELETE /v1/agents/{agent_id}/memory`: clear files, versions, and source material.
+  Active turns must first stop. Existing conversation histories are separate and
+  can still contain remembered facts; delete those sessions when removing data.
+
+Deleting a conversation retains agent memory. Deleting the saved agent and its
+last conversation removes the stored memory and reconciliation material. There
+is no automatic expiry. Operators must manage retention and backups.
+
+## Kubernetes
+
+The deployment is a single-replica StatefulSet with a 1 GiB PVC, a non-root user,
+a read-only root filesystem, and no service-account token. Do not scale this
+SQLite deployment to multiple replicas. Root turns and Responses calls share four
+execution slots. Sessions are limited to 200 turns; the service admits up to
+1,000 sessions and 1,000 saved agents. Root turns stop after 300 seconds.
+
+For the local fixture deployment, from the repository root:
 
 ```sh
-kubectl --context kind-nanocodex -n nanocodex create secret generic nanocodex-api \
-  --from-file=api-token=/absolute/path/to/service-token \
-  --from-file=openai-api-key=/absolute/path/to/provider-key
-kubectl --context kind-nanocodex apply -k deploy/k8s/base
+docker build -f services/api/Dockerfile -t nanocodex-api:k8s-v4 .
+kind load docker-image nanocodex-api:k8s-v4 --name nanocodex
+kubectl --context kind-nanocodex apply -k deploy/k8s/mock
 kubectl --context kind-nanocodex -n nanocodex rollout status statefulset/nanocodex-api
 kubectl --context kind-nanocodex -n nanocodex port-forward service/nanocodex-api 18080:8080
 ```
 
-The base uses a StatefulSet, a 1 GiB volume, a ClusterIP Service, readiness and
-liveness probes, resource limits, a non-root UID, a read-only container
-filesystem, and no Kubernetes API token. It does not create a public ingress.
-For a remote cluster, publish the image to a registry and change the image
-reference in an overlay. Configure TLS at the ingress before remote use.
-The default StorageClass must support `ReadWriteOnce` volumes.
+Create the `nanocodex-api` Secret in the namespace first, with `api-token` and
+`openai-api-key`. Keep real credentials out of shell history and Git. The fixture
+uses a dummy provider key. The base deployment uses `https://api.openai.com/v1`;
+`OPENAI_BASE_URL` can select another compatible endpoint. Applying the base over
+the mock deployment can leave old environment overrides; remove the mock URL
+explicitly before using a real credential.
 
-Roll out a new image with a new tag. Retain the PVC during replacement. To roll
-back the image, use `kubectl --context kind-nanocodex -n nanocodex rollout undo
-statefulset/nanocodex-api`. This development database has no schema upgrade path.
+On restart, persisted completed context and memory are restored. Unfinished
+turns become failed, pending functions are cleared, and old child runtimes close.
+The runtime resumes the last successful checkpoint. During a live session, the
+native runtime controls retention of partial failed or cancelled work.
+SSE is live and has no replay. Connect before submitting input; use stored items
+and turns to recover after a disconnect. Disconnecting a stream does not cancel
+its turn.
 
-## Contract tests with a mock model
-
-The mock overlay runs a small Responses fixture. It performs **no real model
-inference**. Use a dummy `openai-api-key` and a random local API token for it.
+## Verification
 
 ```sh
-kubectl --context kind-nanocodex apply -k deploy/k8s/mock
-bun install --cwd services/api --frozen-lockfile
-# Set NANOCODEX_API_TOKEN from your local token file. Do not print it.
-# Port-forward must already be active.
-NANOCODEX_PROOF_FILE=/tmp/nanocodex-proof bun run --cwd services/api test
-kubectl --context kind-nanocodex -n nanocodex rollout restart statefulset/nanocodex-api
-kubectl --context kind-nanocodex -n nanocodex rollout status statefulset/nanocodex-api
-# Restart port-forward after Pod replacement.
-NANOCODEX_PROOF_FILE=/tmp/nanocodex-proof bun run services/api/tests/restart.ts
+docker build -f services/api/Dockerfile --target test -t nanocodex-api:checks .
+# In a second terminal, expose the fixture for the SDK-owned MCP test:
+kubectl --context kind-nanocodex -n nanocodex port-forward service/mock-model 18081:8081
+cd services/api
+bun install --frozen-lockfile
+bun run test
 ```
 
-The tests call the actual service with the official SDK. Only the model HTTP
-transport is replaced. They check live streams, retained model context,
-idempotency, pagination, cancellation, provider failures, authentication,
-unsupported inputs, and PVC restart recovery.
-
-To switch an existing mock deployment to a real provider, replace the dummy key
-in the Secret, apply the base, explicitly remove the `OPENAI_BASE_URL` override
-if it remains on the StatefulSet, and restart the Pod. Remove the mock Deployment,
-Service, and ConfigMap after it is unused. Validate a real inference call before
-claiming provider integration.
+Set `NANOCODEX_API_TOKEN` to the service token before testing. Optional
+`NANOCODEX_PROOF_FILE` and `NANOCODEX_MEMORY_PROOF_FILE` keep resource IDs for
+`bun tests/restart.ts` after a pod restart. Both must be absolute paths outside
+the checkout. The tests use the real SDKs, HTTP API, NanoCodex runtime, MCP
+transport, SQLite, and Kubernetes. Only model inference is replaced with a
+local deterministic transport. Passing these tests does not prove real-provider
+behavior or complete SDK parity.
 
 ## Privacy scope
 
-This first deployment does not hide data from service or cloud operators.
-Prompts, results, and model checkpoints are readable in process memory and on the
-volume. The selected model provider also receives the model context. No request
-content tracing is enabled by this service. The API token protects access; it is
-not end-to-end encryption. Deletion removes live database records but does not
-erase infrastructure backups or provider retention.
+This version has one operator credential and no tenant authorization boundary.
+An agent ID separates memory records; it is not an access credential. This is a
+local deployment prototype, not a public multi-tenant service.
 
-Optional VM tools, attested confidential execution, client-controlled encryption
-keys, and a multi-tenant control plane are later work. See
-[`MANAGED_PRIVACY_SERVICE.md`](../../docs/MANAGED_PRIVACY_SERVICE.md) for that
-separate design. AX is not required for this single-service Kubernetes deployment.
+Prompts, results, memory, checkpoints, and configured MCP credentials are readable
+by the service and storage operators. The external model provider receives model
+context, including memory needed for a task or reconciliation. No content tracing
+is enabled by this service. Disable SDK tracing in client applications as shown
+above. Enclaves, attestation, encrypted VMs, and end-to-end encryption are not
+implemented. Database deletion does not erase infrastructure backups or provider
+retention.

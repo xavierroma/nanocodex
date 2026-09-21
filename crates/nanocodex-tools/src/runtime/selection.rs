@@ -247,6 +247,10 @@ pub struct ToolsBuilder {
 /// Invalid declarative tool selection.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolsBuildError {
+    /// A per-agent MCP provider has invalid configuration.
+    #[cfg(not(target_family = "wasm"))]
+    #[error(transparent)]
+    Mcp(#[from] crate::mcp::McpBuildError),
     /// A custom definition has an empty registry name.
     #[error("tool name must not be empty")]
     EmptyName,

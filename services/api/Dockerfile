@@ -13,7 +13,13 @@ RUN rustup component add clippy
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo clippy --locked --profile nightly -p nanocodex-api --no-deps -- -D warnings
+    cargo clippy --locked --profile nightly -p nanocodex-api -p nanocodex-memory --no-deps -- -D warnings
+
+FROM check AS test
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo test --locked --profile nightly -p nanocodex-memory --lib
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*

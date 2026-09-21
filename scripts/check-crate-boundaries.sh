@@ -15,6 +15,7 @@ public_packages='[
   "nanocodex",
   "nanocodex-agent",
   "nanocodex-durability",
+  "nanocodex-memory",
   "nanocodex-oai-api",
   "nanocodex-observability",
   "nanocodex-subagents",
@@ -41,7 +42,7 @@ assert_snapshot() {
   exit 1
 }
 
-expected_packages=$'nanocodex\nnanocodex-agent\nnanocodex-durability\nnanocodex-oai-api\nnanocodex-observability\nnanocodex-subagents\nnanocodex-tools\nnanocodex-tools-macros'
+expected_packages=$'nanocodex\nnanocodex-agent\nnanocodex-durability\nnanocodex-memory\nnanocodex-oai-api\nnanocodex-observability\nnanocodex-subagents\nnanocodex-tools\nnanocodex-tools-macros'
 actual_packages="$(
   jq -r '
     .packages[]

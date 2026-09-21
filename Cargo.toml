@@ -4,6 +4,7 @@ members = [
     "bin/nanousd",
     "bin/nanousd-api",
     "crates/nanocodex",
+    "crates/nanocodex-memory",
     "crates/nanocodex-agent",
     "crates/nanocodex-durability",
     "crates/experimental/nanocodex-browser",
@@ -43,6 +44,8 @@ categories = ["api-bindings", "asynchronous", "development-tools"]
 publish = true
 
 [workspace.dependencies]
+anyhow = "1.0"
+nanocodex-memory = { path = "crates/nanocodex-memory" }
 alloy = { version = "2.1.0", default-features = false, features = ["contract", "provider-http", "reqwest", "rpc-types", "sol-types", "std"] }
 arboard = "3"
 base64 = "0.22.1"

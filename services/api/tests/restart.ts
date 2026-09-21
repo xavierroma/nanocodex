@@ -19,3 +19,18 @@ assert.match(output, /Check context after the pod restart/);
 assert.equal((await sessions.items.list(id)).data.length, 6);
 await sessions.delete(id);
 console.log('PASS: PVC history and NanoCodex model context survived the pod restart');
+
+const memoryProof = process.env.NANOCODEX_MEMORY_PROOF_FILE;
+if (!memoryProof) throw new Error('NANOCODEX_MEMORY_PROOF_FILE is required');
+const agentID = (await Bun.file(memoryProof).text()).trim();
+assert.equal((await client.beta.agents.retrieve(agentID)).name, 'Memory owner');
+const recalled = await sessions.create({ agent_id: agentID, environment: { type: 'none' } });
+let memoryOutput = '';
+for await (const event of sessions.stream(recalled.id, { input: '[memory-recall] What is my favorite tree?' })) {
+  if (event.type === 'agent.session.turn.output_text.done') memoryOutput += event.text;
+  if (event.type === 'agent.session.turn.failed') throw new Error(event.turn.error?.message);
+}
+assert.match(memoryOutput, /Favorite tree: cedar/);
+await sessions.delete(recalled.id);
+await client.beta.agents.delete(agentID);
+console.log('PASS: saved agent, curated memory, and memory tool recall survived the pod restart');

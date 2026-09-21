@@ -24,7 +24,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: api
-          image: nanocodex-api:k8s-v1
+          image: nanocodex-api:k8s-v4
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
