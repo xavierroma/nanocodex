@@ -680,3 +680,9 @@ Further reading:
 
 Licensed under either the Apache License, Version 2.0 or the MIT License, at
 your option.
+
+## Self-hosted Agents API
+
+The fork includes a [Kubernetes Agents API](services/api/README.md) backed by the
+NanoCodex engine. It supports a tested text-session subset of the OpenAI SDK,
+without a VM. See that guide for deployment, supported routes, and current limits.

@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-model
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-model
+  template:
+    metadata:
+      labels:
+        app: mock-model
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: model
+          image: oven/bun:1.3.9
+          command: [bun, /fixtures/model.ts]
+          ports:
+            - containerPort: 8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: '1'
+              memory: 128Mi
+          volumeMounts:
+            - name: fixtures
+              mountPath: /fixtures
+              readOnly: true
+      volumes:
+        - name: fixtures
+          configMap:
+            name: mock-model
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-model
+spec:
+  selector:
+    app: mock-model
+  ports:
+    - port: 8081
+      targetPort: 8081

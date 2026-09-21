@@ -1,0 +1,6 @@
+{
+  "name": "nanocodex-api-contract-tests",
+  "private": true,
+  "scripts": { "test": "bun test tests/sdk.test.ts --timeout 30000" },
+  "devDependencies": { "openai": "7.15.0", "@types/bun": "1.3.9" }
+}

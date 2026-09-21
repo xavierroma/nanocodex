@@ -1,3 +1,5 @@
+> Current delivery scope: the first implementation is the [text Agents API](../services/api/README.md) on ordinary Kubernetes. VMs, AX, and confidential execution are optional future work. This document describes the later privacy design, not the current deployment.
+
 # NanoCodex managed service: deployment and privacy design
 
 Checked: 21 September 2026. Status: source review and proposed architecture. No Kubernetes deployment or confidential hardware test has been run.
