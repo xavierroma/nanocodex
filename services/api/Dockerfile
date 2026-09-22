@@ -22,7 +22,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo test --locked --profile nightly -p nanocodex-memory --lib
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/* && install -d -o 10001 -g 10001 -m 0700 /data
 COPY --from=build /nanocodex-api /usr/local/bin/nanocodex-api
 USER 10001:10001
 WORKDIR /tmp

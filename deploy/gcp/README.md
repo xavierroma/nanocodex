@@ -1,10 +1,12 @@
-# GCP pilot deployment
+# Optional GKE deployment
 
 Status: deployment inputs are prepared; no GCP resources have been created.
 The existing local kind deployment is unchanged.
 
-Use GKE Autopilot for the first text-only pilot. The runtime needs no VM or
-privileged container. Keep one API replica because this version uses SQLite.
+The default deployment is now [Docker Compose](../README.md). On GCP, it can
+run on one Compute Engine VM. Use this GKE path if you want Kubernetes.
+The runtime needs no nested VM or privileged container. Keep one API replica
+because this version uses SQLite.
 The GKE overlay selects Linux amd64, requests 0.5 CPU and 1 GiB RAM, and gives
 SQLite a 20 GiB `standard-rwo` volume. The storage is zonal; this is not a
 high-availability deployment. The Service remains internal.
@@ -64,8 +66,10 @@ a real model turn, and memory after a pod replacement through an authenticated
 port forward. Record the running image ID and test result.
 
 GKE's Secret Manager add-on can replace Kubernetes Secret storage in a later
-change. It mounts files; this API currently reads credentials from environment
-variables. Do not assume the add-on automatically creates Kubernetes Secrets.
+change. It mounts files; the API accepts `NANOCODEX_API_TOKEN_FILE` and
+`OPENAI_API_KEY_FILE`. Configure the mounts and access policy explicitly and
+remove the matching direct environment values. The add-on does not automatically
+create Kubernetes Secrets. This overlay still uses Kubernetes Secrets.
 
 ## iMessage and public access
 

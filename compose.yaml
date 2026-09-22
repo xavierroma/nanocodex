@@ -1,0 +1,39 @@
+name: nanocodex
+services:
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    image: ${NANOCODEX_IMAGE:-nanocodex-api:local}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "127.0.0.1:${NANOCODEX_PORT:-8080}:8080"
+    environment:
+      NANOCODEX_DB: /data/nanocodex.sqlite
+      NANOCODEX_API_TOKEN_FILE: /run/secrets/api_token
+      OPENAI_API_KEY_FILE: /run/secrets/model_key
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      NANOCODEX_MCP_ALLOWED_URLS: ${NANOCODEX_MCP_ALLOWED_URLS:-}
+      NANOCODEX_MCP_ALLOWED_COMMANDS: ${NANOCODEX_MCP_ALLOWED_COMMANDS:-}
+    secrets: [api_token, model_key]
+    volumes:
+      - data:/data
+    tmpfs:
+      - /tmp:size=134217728,mode=1777
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --output, /dev/null, http://127.0.0.1:8080/readyz]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+secrets:
+  api_token:
+    environment: NANOCODEX_API_TOKEN
+  model_key:
+    environment: OPENAI_API_KEY
+volumes:
+  data:

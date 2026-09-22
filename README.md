@@ -27,6 +27,11 @@ data, memory, infrastructure, and policy.
 
 </div>
 
+This fork adds a native [managed API](services/api/README.md) with persistent
+agent memory. Start it with [Docker Compose](deploy/README.md). Kubernetes is
+optional. The [managed product plan](docs/MANAGED_SERVICE.md) describes account
+access and computer connections that still need implementation.
+
 Nanocodex is a headless, library-first SDK for building products around one
 deliberately supported OpenAI coding-agent stack. It is not a provider
 abstraction and it is not an app server. The public product is an embeddable

@@ -849,15 +849,29 @@ async fn unsupported() -> ApiError {
     )
 }
 
+fn credential(name: &str) -> eyre::Result<String> {
+    let direct = std::env::var_os(name);
+    let file_name = format!("{name}_FILE");
+    let file = std::env::var_os(&file_name);
+    match (direct, file) {
+        (Some(_), Some(_)) => eyre::bail!("Set {name} or {file_name}, not both"),
+        (Some(value), None) => value
+            .into_string()
+            .map_err(|_| eyre::eyre!("{name} must contain valid UTF-8")),
+        (None, Some(path)) => Ok(std::fs::read_to_string(path)?.trim().to_owned()),
+        (None, None) => eyre::bail!("Set {name} or {file_name}"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     nanocodex::oai::transport::install_default_rustls_crypto_provider();
-    let token = std::env::var("NANOCODEX_API_TOKEN")?;
+    let token = credential("NANOCODEX_API_TOKEN")?;
     eyre::ensure!(
         token.len() >= 32,
         "NANOCODEX_API_TOKEN must have at least 32 bytes"
     );
-    let model_key = std::env::var("OPENAI_API_KEY")?;
+    let model_key = credential("OPENAI_API_KEY")?;
     eyre::ensure!(
         !model_key.trim().is_empty(),
         "OPENAI_API_KEY must not be empty"

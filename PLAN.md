@@ -1,5 +1,13 @@
 # Nanocodex plan
 
+## Managed fork direction
+
+This fork follows [the managed service plan](docs/MANAGED_SERVICE.md): one native
+server, persistent agents, and optional connections to users' computers or VMs.
+Docker Compose is the first deployment path. Kubernetes is optional. The
+Cloudflare implementation below remains an upstream reference, not a deployment
+requirement for this fork.
+
 ## Objective
 
 Build high-quality reusable Rust building blocks for frontier OpenAI agents.

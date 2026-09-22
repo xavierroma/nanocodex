@@ -1,7 +1,16 @@
 # NanoCodex managed API
 
-A Rust HTTP service for NanoCodex, with a Kubernetes deployment and persistent
-agent memory. A VM is optional. The current deployment uses no VM.
+A Rust HTTP service for NanoCodex, with persistent agent memory. Start with
+[Docker Compose](../../deploy/README.md). Kubernetes and VMs are optional.
+See the [managed product plan](../../docs/MANAGED_SERVICE.md) for the next steps.
+
+## Credentials
+
+Supply `NANOCODEX_API_TOKEN` and `OPENAI_API_KEY` as environment variables, or use
+`NANOCODEX_API_TOKEN_FILE` and `OPENAI_API_KEY_FILE` to read them from files. Use
+exactly one source for each credential. The API token must have at least 32
+characters. Compose mounts both credentials as secret files. The existing
+Kubernetes deployment continues to use environment variables from a Secret.
 
 ## API and SDK support
 
@@ -125,7 +134,7 @@ to the server-owned session interface.
 `nanocodex-memory` is an MIT-licensed workspace crate. Each persistent agent ID
 owns a bundle of Markdown files: `profile.md`, generated `index.md`, typed
 records, dated journals, and an audit log. The API stores bundles, prior versions,
-and completed task material in SQLite on the PVC.
+and completed task material in SQLite on the persistent volume.
 
 The root agent gets `memory_read`, `memory_search`, and `memory_journal` by
 default. Profile and index are supplied as untrusted evidence on each new turn.
